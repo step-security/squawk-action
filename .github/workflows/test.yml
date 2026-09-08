@@ -1,0 +1,22 @@
+name: integration test
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  lint_migrations:
+    permissions:
+      contents: read
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Lint SQL migrations
+        uses: ./
+        with:
+          pattern: '*.sql'

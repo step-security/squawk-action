@@ -1,0 +1,158 @@
+# https://help.github.com/en/articles/metadata-syntax-for-github-actions
+name: 'Squawk Action'
+description: 'Lint PostgreSQL migrations with Squawk and report violations as GitHub Pull Request comments'
+author: 'step-security'
+branding:
+  icon: 'check-square'
+  color: 'blue'
+
+inputs:
+  version:
+    description: 'Version of squawk-cli to install from npm'
+    default: 'latest'
+    required: true
+  pattern:
+    description: 'Glob pattern to match SQL migration files (e.g. migrations/*.sql)'
+    required: false
+    default: ''
+  files:
+    description: 'Space-separated list of SQL file paths to lint (supports no glob patterns; use pattern for glob support)'
+    required: false
+    default: ''
+  pg-version:
+    description: 'Target PostgreSQL version for compatibility checks (e.g. 14.0)'
+    required: false
+  assume-in-transaction:
+    description: 'Assume all statements run within a transaction, skipping rules that require explicit transaction control'
+    required: false
+    default: 'false'
+  config:
+    description: 'Path to a custom Squawk configuration file'
+    required: false
+    default: ''
+  exclude:
+    description: 'Comma-separated list of Squawk rule names to exclude from linting'
+    required: false
+  verbose:
+    description: 'Enable verbose output from Squawk'
+    required: false
+    default: 'true'
+  upload-to-github:
+    description: 'Post Squawk lint results as a comment on the pull request'
+    required: false
+    default: 'true'
+  fail-on-violations:
+    description: 'Exit with a non-zero status code when lint violations are found'
+    required: false
+    default: 'false'
+  access_token:
+    description: 'GitHub access token used to post lint results as pull request comments'
+    default: '${{ github.token }}'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Check subscription'
+      shell: bash
+      run: |
+        UPSTREAM="sbdchd/squawk-action"
+        ACTION_REPO="${GITHUB_ACTION_REPOSITORY:-}"
+        DOCS_URL="https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions"
+
+        echo ""
+        echo -e "\033[1;36mStepSecurity Maintained Action\033[0m"
+        echo "Secure drop-in replacement for $UPSTREAM"
+        if [ "$REPO_PRIVATE" = "false" ]; then
+          echo -e "\033[32m✓ Free for public repositories\033[0m"
+        fi
+        echo -e "\033[36mLearn more:\033[0m $DOCS_URL"
+        echo ""
+
+        if [ "$REPO_PRIVATE" != "false" ]; then
+          SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}"
+
+          if [ "$SERVER_URL" != "https://github.com" ]; then
+            BODY=$(printf '{"action":"%s","ghes_server":"%s"}' "$ACTION_REPO" "$SERVER_URL")
+          else
+            BODY=$(printf '{"action":"%s"}' "$ACTION_REPO")
+          fi
+
+          API_URL="https://agent.api.stepsecurity.io/v1/github/$GITHUB_REPOSITORY/actions/maintained-actions-subscription"
+
+          RESPONSE=$(curl --max-time 3 -s -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "$API_URL" -o /dev/null) && CURL_EXIT_CODE=0 || CURL_EXIT_CODE=$?
+
+          if [ $CURL_EXIT_CODE -ne 0 ]; then
+            echo "Timeout or API not reachable. Continuing to next step."
+          elif [ "$RESPONSE" = "403" ]; then
+            echo -e "::error::\033[1;31mThis action requires a StepSecurity subscription for private repositories.\033[0m"
+            echo -e "::error::\033[31mLearn how to enable a subscription: $DOCS_URL\033[0m"
+            exit 1
+          fi
+        fi
+      env:
+        REPO_PRIVATE: ${{ github.event.repository.private }}
+    - name: 'Set up Node.js'
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      with:
+        node-version: 20
+    - name: 'Install squawk-cli'
+      shell: bash
+      run: npm install -g "squawk-cli@$VERSION"
+      env:
+        VERSION: ${{ inputs.version }}
+    - name: 'Run squawk'
+      shell: bash
+      run: |
+        # Build global flags
+        GLOBAL_FLAGS=()
+        [ "${INPUT_ASSUME_IN_TRANSACTION}" = "true" ] && GLOBAL_FLAGS+=(--assume-in-transaction)
+        [ -n "${INPUT_CONFIG}" ]                      && GLOBAL_FLAGS+=("--config=${INPUT_CONFIG}")
+        [ -n "${INPUT_EXCLUDE}" ]                     && GLOBAL_FLAGS+=("--exclude=${INPUT_EXCLUDE}")
+        [ -n "${INPUT_PG_VERSION}" ]                  && GLOBAL_FLAGS+=("--pg-version=${INPUT_PG_VERSION}")
+        [ "${INPUT_VERBOSE}" = "true" ]               && GLOBAL_FLAGS+=(--verbose)
+
+        # Resolve target files from explicit list and/or glob pattern
+        TARGETS=()
+        if [ -n "${INPUT_FILES}" ]; then
+          read -ra TARGETS <<< "${INPUT_FILES}"
+        fi
+        if [ -n "${INPUT_PATTERN}" ]; then
+          while IFS= read -r -d '' f; do
+            TARGETS+=("$f")
+          done < <(find . \( -path "./${INPUT_PATTERN}" -or -path "${INPUT_PATTERN}" \) -type f -print0)
+        fi
+
+        # Configure GitHub integration
+        SQUAWK_GITHUB_REPO_OWNER=$(jq --raw-output .repository.owner.login "${GITHUB_EVENT_PATH}")
+        SQUAWK_GITHUB_REPO_NAME=$(jq --raw-output .repository.name "${GITHUB_EVENT_PATH}")
+        SQUAWK_GITHUB_PR_NUMBER=$(jq --raw-output .pull_request.number "${GITHUB_EVENT_PATH}")
+        export SQUAWK_GITHUB_API_URL="${GITHUB_API_URL}"
+        export SQUAWK_GITHUB_TOKEN="${INPUT_ACCESS_TOKEN}"
+        export SQUAWK_GITHUB_REPO_OWNER SQUAWK_GITHUB_REPO_NAME SQUAWK_GITHUB_PR_NUMBER
+
+        # Assemble command: squawk [global-flags] [upload-to-github [--fail-on-violations]] [files]
+        CMD=(squawk "${GLOBAL_FLAGS[@]}")
+        if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && [ "${INPUT_UPLOAD_TO_GITHUB}" = "true" ]; then
+          CMD+=(upload-to-github)
+          [ "${INPUT_FAIL_ON_VIOLATIONS}" = "true" ] && CMD+=(--fail-on-violations)
+        fi
+        CMD+=("${TARGETS[@]}")
+
+        echo "Running: ${CMD[*]}"
+        "${CMD[@]}"
+      env:
+        INPUT_ASSUME_IN_TRANSACTION: ${{ inputs.assume-in-transaction }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_EXCLUDE: ${{ inputs.exclude }}
+        INPUT_UPLOAD_TO_GITHUB: ${{ inputs.upload-to-github }}
+        INPUT_FAIL_ON_VIOLATIONS: ${{ inputs.fail-on-violations }}
+        INPUT_FILES: ${{ inputs.files }}
+        INPUT_PATTERN: ${{ inputs.pattern }}
+        INPUT_PG_VERSION: ${{ inputs.pg-version }}
+        INPUT_VERBOSE: ${{ inputs.verbose }}
+        INPUT_ACCESS_TOKEN: ${{ inputs.access_token }}
