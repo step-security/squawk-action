@@ -6,7 +6,7 @@ on:
 permissions: {}
 
 jobs:
-  lint_migrations:
+  test:
     permissions:
       contents: read
       pull-requests: write
