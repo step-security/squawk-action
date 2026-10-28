@@ -22,6 +22,7 @@ inputs:
   pg-version:
     description: 'Target PostgreSQL version for compatibility checks (e.g. 14.0)'
     required: false
+    default: ''
   assume-in-transaction:
     description: 'Assume all statements run within a transaction, skipping rules that require explicit transaction control'
     required: false
@@ -33,6 +34,7 @@ inputs:
   exclude:
     description: 'Comma-separated list of Squawk rule names to exclude from linting'
     required: false
+    default: ''
   verbose:
     description: 'Enable verbose output from Squawk'
     required: false
